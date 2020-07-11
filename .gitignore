@@ -1,0 +1,11 @@
+env/
+cells/
+tessdata/
+All.json
+item_data.*
+*.jpg
+*.png
+primes_needed.txt
+*.old
+inv.json
+.~lock.*
