@@ -27,6 +27,7 @@ warframe_items_file = "All.json"
 
 
 OCR_THREADS = 3
+PRICE_FETCH_THREADS = 2
 
 
 precrop_origin = (0, 0)
@@ -44,33 +45,37 @@ cell_count_size   = (25, 25)
 
 
 last_warframe_market_request_time = 0
-warframe_market_rate_limit = 3
+warframe_market_rate_limit = 2.5 #max requests per second
 
 
-def main(fnames):
-    prime_parts = load_prime_parts()
+def main(fnames, inventory=None):
+    prime_parts, prime_items = load_primes()
     needed_primes = load_needed_primes()
 
-    inventory = load_inventory(prime_parts)
+    if inventory is None:
+        inventory = load_inventory(fnames, prime_parts)
+        dumpf(inventory, "inventory.json")
+
+    prime_items = inventory_count(inventory, prime_parts, prime_items)
+    dumpf(prime_items, "prime_items.json")
 
     sell_orders = load_sell_orders(username, prime_parts)
     item_price_data = get_item_prices(inventory, sell_orders)
 
-    my_items = assemble_my_items(inventory, sell_orders, prime_parts, item_price_data, needed_primes)
-
-    with open("item_data.json", "w") as f:
-        json.dump(my_items, f, indent=4)
+    my_items = assemble_my_items(inventory, sell_orders, prime_parts, prime_items, item_price_data, needed_primes)
+    dumpf(my_items, "item_data.json")
 
     to_csv(my_items, "item_data.csv")
 
 
-def load_prime_parts(fname=warframe_items_file):
+def load_primes(fname=warframe_items_file):
     print("Loading list of valid Prime parts")
 
     with open(fname, encoding="utf-8") as f:
         items = json.load(f)
 
     prime_parts = {}
+    prime_items = {}
     for i in items:
         if "Prime" in i["name"] and i["type"] != "Extractor" and (i["type"] != "Skin" or i["name"] == "Kavasa Prime Kubrow Collar"):
             if "components" in i:
@@ -79,13 +84,30 @@ def load_prime_parts(fname=warframe_items_file):
                         comp_name = comp["name"]
                         if comp_name in ("Neuroptics", "Chassis", "Harness", "Wings") or (comp_name == "Systems" and i["category"] != "Sentinels"):
                             comp_name += " Blueprint"
-                            
-                        if i["name"] == "Kavasa Prime Kubrow Collar" and comp_name != "Blueprint":
-                            prime_parts[comp_name] = comp["ducats"]
-                        else:
-                            prime_parts["{} {}".format(i["name"], comp_name)] = comp["ducats"]
-    
-    return prime_parts
+
+                        if not (i["name"] == "Kavasa Prime Kubrow Collar" and comp_name != "Blueprint"):
+                            comp_name = "{} {}".format(i["name"], comp_name)
+
+                        prime_parts[comp_name] = {
+                            "ducats"  : comp["ducats"],
+                            "base"    : i["name"],
+                            "per_set" : comp["itemCount"]
+                        }
+
+                        if i["name"] not in prime_items:
+                            prime_items[i["name"]] = {
+                                "sets_owned" : None,
+                                "parts"      : {}
+                            }
+
+                        prime_items[i["name"]]["parts"][comp_name] = {
+                            "per_set" : comp["itemCount"],
+                            "owned"   : 0
+                        }
+
+    dumpf(prime_parts, "prime_parts.json")
+    dumpf(prime_items, "prime_items.json")
+    return prime_parts, prime_items
 
 
 def filter_items(fname=warframe_items_file):
@@ -103,11 +125,10 @@ def filter_items(fname=warframe_items_file):
                         else:
                             prime_parts["{} {}".format(i["name"], comp["name"])] = i
 
-    with open("filtered_items.json", "w") as f:
-        json.dump(prime_parts, f)
+    dumpf(prime_parts, "filtered_items.json")
 
 
-def load_inventory(prime_parts):
+def load_inventory(fnames, prime_parts):
     print("Reading inventory from screenshots...")
 
     cells = cut_cells(fnames)
@@ -126,6 +147,17 @@ def load_inventory(prime_parts):
             inventory[name] = cells_text[i][1]
 
     return inventory
+
+
+def inventory_count(inventory, prime_parts, prime_items):
+    for part in inventory:
+        prime_items[prime_parts[part]["base"]]["parts"][part]["owned"] += 1
+
+    for prime in prime_items:
+        p = prime_items[prime]
+        p["sets_owned"] = min((p["parts"][part]["owned"] // p["parts"][part]["per_set"]) for part in p["parts"])
+
+    return prime_items
 
 
 def cut_cells(fnames):
@@ -183,6 +215,9 @@ def ocr_cell(cell):
     cell_name = ocr(cell[1], string.ascii_letters+" &").strip().replace("\n", " ").replace("\r", "")
 
     cell_count = ocr(cell[2], string.digits, True).strip()
+    if cell_count == "G":
+        cell_count = 6
+        print("G")
     cell_count = int(cell_count) if cell_count else 1
 
     print("\t[{}]\t\t{}\t{}".format(cell[3], cell_count, cell_name), flush=True)
@@ -284,11 +319,11 @@ def load_sell_orders(username, prime_parts):
         # Warframe parts
         name = name.replace("Neuroptics", "Neuroptics Blueprint")
         name = name.replace("Chassis",    "Chassis Blueprint")
-        
+
         # Archwing parts
         name = name.replace("Harness", "Harness Blueprint")
         name = name.replace("Wings",   "Wings Blueprint")
-        
+
         # Systems can be a Warframe, Archwing, or Sentinel part, but Sentinel parts don't have blueprints
         bp_name = name.replace("Systems", "Systems Blueprint")
         if bp_name in prime_parts:
@@ -319,7 +354,7 @@ def get_item_prices(inventory, sell_orders):
 
     item_price_data = {}
 
-    ex = concurrent.futures.ThreadPoolExecutor(4)
+    ex = concurrent.futures.ThreadPoolExecutor(PRICE_FETCH_THREADS)
     results = ex.map(get_item_price_data, sorted(list(inventory.keys() | sell_orders.keys())))
     for r in results:
         item_price_data[r[0]] = r[1]
@@ -339,7 +374,7 @@ def get_item_price_data(item):
         "vwap"   : []
     }
 
-    market_url_name = item.lower().replace(" ", "_").replace("&", "and")
+    market_url_name = item.lower().replace(" ", "_").replace("&", "and").replace("'", "")
     market_url_name = market_url_name.replace("neuroptics_blueprint", "neuroptics")
     market_url_name = market_url_name.replace("chassis_blueprint",    "chassis")
     market_url_name = market_url_name.replace("systems_blueprint",    "systems")
@@ -384,18 +419,24 @@ def get_item_price_data(item):
 def warframe_market_request(url, extractor):
     global last_warframe_market_request_time
 
-    time_now = time.time()
-    if last_warframe_market_request_time + 1/warframe_market_rate_limit > time_now:
-        time.sleep(last_warframe_market_request_time + 1/warframe_market_rate_limit - time_now)
+    while True:
+        time_now = time.time()
+        if last_warframe_market_request_time + 1/warframe_market_rate_limit > time_now:
+            time.sleep(last_warframe_market_request_time + 1/warframe_market_rate_limit - time_now)
 
-    last_warframe_market_request_time = time.time()
-    r = requests.get(url)
-    try:
-        return extractor(json.loads(r.text))
-    except:
-        print(url)
-        print(r.text)
-        raise
+        last_warframe_market_request_time = time.time()
+        r = requests.get(url)
+
+        if "503 Service Temporarily Unavailable" in r.text:
+            print("503")
+            continue
+
+        try:
+            return extractor(json.loads(r.text))
+        except:
+            print(url)
+            print(r.text)
+            raise
 
 
 def load_needed_primes(fname="primes_needed.txt"):
@@ -406,17 +447,18 @@ def load_needed_primes(fname="primes_needed.txt"):
     return tuple(needed_primes)
 
 
-def assemble_my_items(inventory, sell_orders, prime_parts, item_price_data, needed_primes):
+def assemble_my_items(inventory, sell_orders, prime_parts, prime_items, item_price_data, needed_primes):
     my_items = {}
     for item in sorted(list(inventory.keys() | sell_orders.keys())):
         item_data = {}
 
         item_data["needed"] = item.split("Prime")[0].startswith(needed_primes)
+        item_data["sets"] = prime_items[prime_parts[item]["base"]]["sets_owned"] if item in prime_parts else 0
         item_data["inventory"] = inventory[item] if item in inventory else 0
         item_data["my_sell_order"] = sell_orders[item] if item in sell_orders else {"quantity": 0, "platinum": None}
         item_data["price_data"] = item_price_data[item]
         item_data["platinum"] = item_data["price_data"]["median"][-1]
-        item_data["ducats"] = prime_parts[item] if item in prime_parts else None
+        item_data["ducats"] = prime_parts[item]["ducats"] if item in prime_parts else None
 
         try:
             item_data["ducats_per_plat"] = item_data["ducats"] / item_data["platinum"]
@@ -437,11 +479,12 @@ def to_csv(my_items, fname="item_data.csv"):
     print("Writing CSV file")
 
     with open(fname, "w") as f:
-        f.write('Item,Needed,Inventory,Sell Order Quantity,Quantity Diff,Sell Order Platinum,Platinum,Ducats,Ducats per Plat,Plat per Ducat,Num Live Orders,Live Orders\n')
+        f.write('Item,Needed,Sets,Inventory,Sell Order Quantity,Quantity Diff,Sell Order Platinum,Platinum,Ducats,Ducats per Plat,Plat per Ducat,Num Live Orders,Live Orders\n')
         for item in sorted(list(my_items.keys())):
             i = my_items[item]
             f.write("{},".format(item))
             f.write("{},".format("Yes" if i["needed"] else ""))
+            f.write("{},".format(i["sets"] or ""))
             f.write("{},".format(i["inventory"] or ""))
             f.write("{},".format(i["my_sell_order"]["quantity"] or ""))
             f.write("{},".format((i["inventory"] - i["my_sell_order"]["quantity"] if i["inventory"] and i["my_sell_order"]["quantity"] else "") or ""))
@@ -454,6 +497,10 @@ def to_csv(my_items, fname="item_data.csv"):
             f.write("{}\n".format(" ".join(str(x) for x in i["price_data"]["live_orders"][:10]) + (" ..." if len(i["price_data"]["live_orders"]) > 10 else "")))
 
 
+def dumpf(data, fname):
+    with open(fname, "w") as f:
+        json.dump(data, f, indent=4)
+
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--x":
         with open("item_data.json") as f:
@@ -461,5 +508,11 @@ if __name__ == "__main__":
         to_csv(item_data)
         sys.exit()
 
-    fnames = [os.path.join(sys.argv[1], x) for x in os.listdir(sys.argv[1])]
-    main(fnames)
+    elif len(sys.argv) == 3 and sys.argv[1] == "-i":
+        with open(sys.argv[2]) as f:
+            inventory = json.load(f)
+        main(None, inventory)
+
+    else:
+        fnames = [os.path.join(sys.argv[1], x) for x in os.listdir(sys.argv[1])]
+        main(fnames, None)

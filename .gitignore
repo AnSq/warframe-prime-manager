@@ -7,5 +7,5 @@ item_data.*
 *.png
 primes_needed.txt
 *.old
-inv.json
+*.json
 .~lock.*
