@@ -22,12 +22,12 @@ from pprint import pprint as pp
 
 username = "AnSq00"
 
-# https://github.com/WFCD/warframe-items/blob/development/data/json/All.json
+# https://github.com/WFCD/warframe-items/blob/master/data/json/All.json
 warframe_items_file = "All.json"
 
 
 OCR_THREADS = 3
-PRICE_FETCH_THREADS = 2
+PRICE_FETCH_THREADS = 1
 
 
 precrop_origin = (0, 0)
@@ -40,12 +40,12 @@ cell_spacing = (27, 33)
 
 cell_name_offset  = (0, 93)
 cell_name_size    = (157, 64)
-cell_count_offset = (0, 0)
-cell_count_size   = (25, 25)
+cell_count_offset = (29, 3)
+cell_count_size   = (23, 25)
 
 
 last_warframe_market_request_time = 0
-warframe_market_rate_limit = 2.5 #max requests per second
+warframe_market_rate_limit = 2.8 #max requests per second
 
 
 def main(fnames, inventory=None):
@@ -151,7 +151,7 @@ def load_inventory(fnames, prime_parts):
 
 def inventory_count(inventory, prime_parts, prime_items):
     for part in inventory:
-        prime_items[prime_parts[part]["base"]]["parts"][part]["owned"] += 1
+        prime_items[prime_parts[part]["base"]]["parts"][part]["owned"] = inventory[part]
 
     for prime in prime_items:
         p = prime_items[prime]
@@ -239,16 +239,16 @@ def ocr_subprocess(im, alphabet=None, single_line=False):
     return text.decode()
 
 
-def ocr_tesserocr(im, alphabet=None, single_line=False):
-    with tesserocr.PyTessBaseAPI() as tess:
-        if single_line:
-            tess.SetPageSegMode(tesserocr.PSM.SINGLE_LINE)
-        if alphabet:
-            tess.SetVariable("tessedit_char_whitelist", alphabet)
+# def ocr_tesserocr(im, alphabet=None, single_line=False):
+#     with tesserocr.PyTessBaseAPI() as tess:
+#         if single_line:
+#             tess.SetPageSegMode(tesserocr.PSM.SINGLE_LINE)
+#         if alphabet:
+#             tess.SetVariable("tessedit_char_whitelist", alphabet)
 
-        tess.SetImage(im)
-        result = tess.GetUTF8Text()
-    return result
+#         tess.SetImage(im)
+#         result = tess.GetUTF8Text()
+#     return result
 
 
 ocr = ocr_subprocess
@@ -316,18 +316,24 @@ def load_sell_orders(username, prime_parts):
     for order in orders:
         name = order["item"]["en"]["item_name"]
 
-        # Warframe parts
-        name = name.replace("Neuroptics", "Neuroptics Blueprint")
-        name = name.replace("Chassis",    "Chassis Blueprint")
+        if "Blueprint" not in name:
+            # Warframe parts
+            name = name.replace("Neuroptics", "Neuroptics Blueprint")
+            name = name.replace("Chassis",    "Chassis Blueprint")
 
-        # Archwing parts
-        name = name.replace("Harness", "Harness Blueprint")
-        name = name.replace("Wings",   "Wings Blueprint")
+            # Archwing parts
+            name = name.replace("Harness", "Harness Blueprint")
+            name = name.replace("Wings",   "Wings Blueprint")
 
-        # Systems can be a Warframe, Archwing, or Sentinel part, but Sentinel parts don't have blueprints
-        bp_name = name.replace("Systems", "Systems Blueprint")
-        if bp_name in prime_parts:
-            name = bp_name
+            # Landing Craft Parts
+            name = name.replace("Avionics", "Avionics Blueprint")
+            name = name.replace("Fuselage", "Fuselage Blueprint")
+            name = name.replace("Engines",  "Engines Blueprint")
+
+            # Systems can be a Warframe, Archwing, or Sentinel part, but Sentinel parts don't have blueprints
+            bp_name = name.replace("Systems", "Systems Blueprint")
+            if bp_name in prime_parts:
+                name = bp_name
 
         items[name] = {"quantity": order["quantity"], "platinum": int(order["platinum"])}
 
@@ -356,6 +362,7 @@ def get_item_prices(inventory, sell_orders):
 
     ex = concurrent.futures.ThreadPoolExecutor(PRICE_FETCH_THREADS)
     results = ex.map(get_item_price_data, sorted(list(inventory.keys() | sell_orders.keys())))
+    # results = map(get_item_price_data, sorted(list(inventory.keys() | sell_orders.keys())))
     for r in results:
         item_price_data[r[0]] = r[1]
 
@@ -380,39 +387,54 @@ def get_item_price_data(item):
     market_url_name = market_url_name.replace("systems_blueprint",    "systems")
     market_url_name = market_url_name.replace("wings_blueprint",      "wings")
     market_url_name = market_url_name.replace("harness_blueprint",    "harness")
+    market_url_name = market_url_name.replace("avionics_blueprint",   "avionics")
+    market_url_name = market_url_name.replace("fuselage_blueprint",   "fuselage")
+    market_url_name = market_url_name.replace("engines_blueprint",    "engines")
 
     if "imprint" not in market_url_name and "kavasa" not in market_url_name :
         market_url_name = market_url_name.replace("kubrow_", "")
 
-    orders = warframe_market_request("https://api.warframe.market/v1/items/{}/orders".format(market_url_name), lambda x: x["payload"]["orders"])
-    for o in orders:
-        if o["order_type"] != "sell" \
-            or o["platform"] != "pc" \
-            or o["region"] != "en" \
-            or not o["visible"] \
-            or o["user"]["status"] != "ingame":
-                continue
+    for i in range(2):
+        try:
+            orders = warframe_market_request("https://api.warframe.market/v1/items/{}/orders".format(market_url_name), lambda x: x["payload"]["orders"])
+            for o in orders:
+                if o["order_type"] != "sell" \
+                    or o["platform"] != "pc" \
+                    or o["region"] != "en" \
+                    or not o["visible"] \
+                    or o["user"]["status"] != "ingame":
+                        continue
 
-        price_data["live_orders"].append(int(o["platinum"]))
-    price_data["live_orders"].sort()
+                price_data["live_orders"].append(int(o["platinum"]))
+            price_data["live_orders"].sort()
 
-    seven_day_stats = warframe_market_request("https://api.warframe.market/v1/items/{}/statistics".format(market_url_name), lambda x: x["payload"]["statistics_closed"]["90days"][-7:])
-    for day in seven_day_stats:
-        for stat in (
-                ('volume',     'volume', int),
-                ('min_price',  'min',    int),
-                ('max_price',  'max',    int),
-                ('avg_price',  'mean',   float),
-                ('median',     'median', float),
-                ('moving_avg', 'moving', float),
-                ('wa_price',   'vwap',   float)
-            ):
-            try:
-                price_data[stat[1]].append(stat[2](day[stat[0]]))
-            except KeyError:
-                price_data[stat[1]].append(None)
+            seven_day_stats = warframe_market_request("https://api.warframe.market/v1/items/{}/statistics".format(market_url_name), lambda x: x["payload"]["statistics_closed"]["90days"][-7:])
+            for day in seven_day_stats:
+                for stat in (
+                        ('volume',     'volume', int),
+                        ('min_price',  'min',    int),
+                        ('max_price',  'max',    int),
+                        ('avg_price',  'mean',   float),
+                        ('median',     'median', float),
+                        ('moving_avg', 'moving', float),
+                        ('wa_price',   'vwap',   float)
+                    ):
+                    try:
+                        price_data[stat[1]].append(stat[2](day[stat[0]]))
+                    except KeyError:
+                        price_data[stat[1]].append(None)
 
-    print('\t{}\t{}'.format(price_data["median"][-1], item), flush=True)
+            break
+        except ValueError as e:
+            if e.args == ("404",):
+                print("404", market_url_name)
+                market_url_name += "_blueprint"
+                if i == 1:
+                    raise
+            else:
+                raise
+
+    print(f'\t{price_data["median"][-1]}\t{item}\t{market_url_name}', flush=True)
     return (item, price_data)
 
 
@@ -430,6 +452,9 @@ def warframe_market_request(url, extractor):
         if "503 Service Temporarily Unavailable" in r.text:
             print("503")
             continue
+
+        if r.status_code == 404:
+            raise ValueError("404")
 
         try:
             return extractor(json.loads(r.text))
@@ -479,7 +504,7 @@ def to_csv(my_items, fname="item_data.csv"):
     print("Writing CSV file")
 
     with open(fname, "w") as f:
-        f.write('Item,Needed,Sets,Inventory,Sell Order Quantity,Quantity Diff,Sell Order Platinum,Platinum,Ducats,Ducats per Plat,Plat per Ducat,Num Live Orders,Live Orders\n')
+        f.write('Item,Needed,Sets,Inventory,Sell Order Quantity,Quantity Diff,Sell Order Platinum,Platinum,Ducats,Ducats per Plat,Plat per Ducat,Num Live Orders,Live Orders,1st Order,2nd Order\n')
         for item in sorted(list(my_items.keys())):
             i = my_items[item]
             f.write("{},".format(item))
@@ -494,7 +519,10 @@ def to_csv(my_items, fname="item_data.csv"):
             f.write("{:.2f},".format(i["ducats_per_plat"]) if i["ducats_per_plat"] else ",")
             f.write("{:.2f},".format(i["plat_per_ducat"]) if i["plat_per_ducat"] else ",")
             f.write("{},".format(len(i["price_data"]["live_orders"])))
-            f.write("{}\n".format(" ".join(str(x) for x in i["price_data"]["live_orders"][:10]) + (" ..." if len(i["price_data"]["live_orders"]) > 10 else "")))
+            f.write("{},".format(" ".join(str(x) for x in i["price_data"]["live_orders"][:10]) + (" ..." if len(i["price_data"]["live_orders"]) > 10 else "")))
+            f.write("{},".format(i["price_data"]["live_orders"][0] if len(i["price_data"]["live_orders"]) > 0 else ""))
+            f.write("{},".format(i["price_data"]["live_orders"][1] if len(i["price_data"]["live_orders"]) > 1 else ""))
+            f.write("\n")
 
 
 def dumpf(data, fname):

@@ -1,7 +1,7 @@
 env/
 cells/
 tessdata/
-All.json
+All.json*
 item_data.*
 *.jpg
 *.png
